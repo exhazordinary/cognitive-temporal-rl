@@ -1,132 +1,143 @@
 # Cognitive Temporal RL
 
-Entropy-based internal clock for modeling cognitive temporal experience in RL agents.
+**Research Question:** Does giving an RL agent a "sense of time" improve learning?
 
-## Overview
+## The Problem
 
-This project implements an entropy-based "internal clock" that creates a cognitive analog of temporal experience in reinforcement learning agents. The system measures entropy changes in internal state distributions to produce salience signals, which modulate training dynamics.
+Humans don't experience time uniformly:
+- **Novel/surprising moments** → time "slows down" (you encode more, remember better)
+- **Routine moments** → time "speeds up" (blurs together, less attention)
 
-**Key idea:** High entropy changes (novelty/chaos OR sudden stability) = salient moments = more "internal time" passes.
+Standard RL agents treat every timestep equally. What if they didn't?
+
+## The Hypothesis
+
+Use **entropy changes** in the agent's state representation as a proxy for "how surprising is this moment":
+
+```
+High |ΔEntropy| = "Something novel happened"  = SALIENT MOMENT
+Low  |ΔEntropy| = "Business as usual"         = ROUTINE MOMENT
+```
+
+Then modulate training based on salience:
+- **Learn more** from surprising moments
+- **Learn less** from routine moments
+
+Expected benefits: faster learning, better sample efficiency, more robust policies.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│           Entropy-Clock Module                  │
-│  (Standalone, reusable across RL/LLM/etc.)      │
-├─────────────────────────────────────────────────┤
-│           Salience Modulators                   │
-│  (Replay / Learning Rate / Exploration)         │
-├─────────────────────────────────────────────────┤
-│           Base RL Agent (PPO)                   │
-│  (LunarLander environment)                      │
-└─────────────────────────────────────────────────┘
+State observation
+       ↓
+┌─────────────────────────────────────┐
+│      Entropy Clock Module           │
+│  Computes entropy over state window │
+│  Outputs: salience_score, Δentropy  │
+└─────────────────────────────────────┘
+       ↓
+┌─────────────────────────────────────┐
+│      Salience Modulators            │
+│  • Learning Rate modulation         │
+│  • Exploration/exploitation balance │
+│  • Experience replay prioritization │
+└─────────────────────────────────────┘
+       ↓
+┌─────────────────────────────────────┐
+│      PPO Agent (LunarLander)        │
+│  Training with modulated parameters │
+└─────────────────────────────────────┘
 ```
+
+## Current Findings
+
+### Experiment: Baseline vs Salience LR (5 seeds, 200k timesteps)
+
+| Condition | Mean Final Reward | Std Dev |
+|-----------|-------------------|---------|
+| **Baseline PPO** | **151.27** | 51.77 |
+| Salience LR | 70.35 | 77.27 |
+
+**Result:** Baseline wins. The current salience LR implementation hurts performance.
+
+### Interpretation
+
+The hypothesis as currently implemented doesn't work. Possible reasons:
+1. LR modulation too aggressive (γ=0.5 might be too strong)
+2. Per-step modulation too noisy (should modulate per-episode?)
+3. Direction might be wrong (high salience should *decrease* LR to stabilize?)
+4. The hypothesis itself might not apply to PPO
+
+### Next Steps
+- [ ] Tune hyperparameters (try γ=0.1, 0.2, 0.3)
+- [ ] Test other modulators (exploration, replay)
+- [ ] Try inverting the hypothesis
+- [ ] Analyze when/why it diverges
 
 ## Quick Start
 
-### Using uv (recommended)
-
 ```bash
-# Clone and enter project
+# Setup
 cd cognitive-temporal-rl
-
-# Create virtual environment and install dependencies
-uv venv
-source .venv/bin/activate  # or `.venv\Scripts\activate` on Windows
+uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
 
 # Run tests
 uv run pytest tests/ -v
 
-# Train baseline
-uv run python -m src.agents.base_ppo
-
-# Train with entropy clock (salience LR enabled)
+# Train and watch agent
 uv run python -m src.agents.temporal_ppo
+uv run python scripts/watch.py --model models/temporal_ppo_lunarlander
 
-# Run full ablation study
-uv run python -m src.experiments.train --experiments baseline salience_lr --timesteps 100000 --seeds 3
+# Run ablation study
+uv run python -m src.experiments.train --experiments baseline salience_lr --timesteps 200000 --seeds 5
 ```
-
-### Using pip
-
-```bash
-cd cognitive-temporal-rl
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-pytest tests/ -v
-```
-
-## Experiments
-
-The ablation study tests these conditions:
-
-| Experiment | Salience Replay | Salience LR | Salience Exploration |
-|------------|-----------------|-------------|---------------------|
-| baseline | ❌ | ❌ | ❌ |
-| salience_replay | ✅ | ❌ | ❌ |
-| salience_lr | ❌ | ✅ | ❌ |
-| salience_exploration | ❌ | ❌ | ✅ |
-| all_modulators | ✅ | ✅ | ✅ |
-
-Run specific experiments:
-
-```bash
-# Quick test (short runs)
-uv run python -m src.experiments.train --experiments baseline salience_lr --timesteps 50000 --seeds 2
-
-# Full ablation (takes longer)
-uv run python -m src.experiments.train --timesteps 500000 --seeds 5
-```
-
-Results are saved to `results/` as JSON files.
 
 ## Project Structure
 
 ```
 cognitive-temporal-rl/
 ├── src/
-│   ├── entropy_clock/      # Core entropy computation
-│   │   ├── clock.py        # EntropyClockModule
-│   │   └── buffers.py      # StateBuffer
-│   ├── modulators/         # Salience-based modulators
-│   │   ├── replay.py       # Prioritized replay
-│   │   ├── learning_rate.py
-│   │   └── exploration.py
+│   ├── entropy_clock/         # Core: entropy computation
+│   │   ├── clock.py           # EntropyClockModule - the main idea
+│   │   └── buffers.py         # Rolling state buffer
+│   ├── modulators/            # Experiments: how salience affects training
+│   │   ├── learning_rate.py   # Modulate LR by salience
+│   │   ├── exploration.py     # Modulate exploration by entropy
+│   │   └── replay.py          # Prioritize replay by salience
 │   ├── agents/
-│   │   ├── base_ppo.py     # Vanilla PPO baseline
-│   │   └── temporal_ppo.py # PPO + entropy clock
+│   │   ├── base_ppo.py        # Vanilla PPO baseline
+│   │   └── temporal_ppo.py    # PPO + entropy clock
 │   └── experiments/
-│       ├── config.py       # Experiment configs
-│       └── train.py        # Training script
+│       ├── config.py          # Experiment configurations
+│       └── train.py           # Ablation runner
+├── scripts/
+│   └── watch.py               # Visualize agent playing
 ├── tests/
-├── results/
-├── docs/plans/
-└── pyproject.toml
+├── results/                   # Experiment outputs (JSON)
+└── docs/plans/
 ```
 
-## Key Concepts
+## Key Code Locations
 
-### Entropy Clock
+| Concept | File | Function/Class |
+|---------|------|----------------|
+| Entropy calculation | `entropy_clock/clock.py` | `_compute_covariance_entropy()` |
+| Salience scoring | `entropy_clock/clock.py` | `EntropyClockModule.step()` |
+| LR modulation | `modulators/learning_rate.py` | `SalienceLR.get_lr()` |
+| Integration point | `agents/temporal_ppo.py` | `TemporalCallback._on_step()` |
 
-Measures Shannon entropy over a rolling window of states using Gaussian approximation:
+## Background
 
-```
-H(S) ≈ 0.5 * log(det(Σ))
-```
+This project explores whether cognitive-inspired temporal mechanisms can improve RL training. The core idea:
 
-High |ΔH| = salient moment.
+- Humans experience "time dilation" during novel events
+- This can be modeled computationally using entropy as a proxy
+- An "internal clock" that speeds up during routine and slows during novelty might help agents focus on what matters
 
-### Salience Modulators
+The goal is to test whether this mechanism has practical benefits for RL, not to make claims about AI consciousness.
 
-1. **Replay**: High-salience transitions get sampled more during training
-2. **Learning Rate**: Higher LR during novel moments, lower during routine
-3. **Exploration**: High internal entropy → exploit; Low → explore
+## References
 
-## Future Work
-
-- LLM integration (entropy over hidden states)
-- Complex environments (Atari, MuJoCo)
-- Meta-monitoring layer
+- PPO: [Proximal Policy Optimization](https://arxiv.org/abs/1707.06347)
+- Environment: [LunarLander-v3](https://gymnasium.farama.org/environments/box2d/lunar_lander/)

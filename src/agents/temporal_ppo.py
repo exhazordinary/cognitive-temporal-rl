@@ -216,7 +216,14 @@ class TemporalPPO:
 
 
 if __name__ == "__main__":
-    # Quick test
+    import os
+    from pathlib import Path
+
+    # Create models directory
+    models_dir = Path(__file__).parent.parent.parent / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    # Train agent
     agent = TemporalPPO(
         use_salience_lr=True,
         seed=42,
@@ -224,4 +231,13 @@ if __name__ == "__main__":
     )
     results = agent.train(total_timesteps=50000)
     print(f"\nFinal mean reward: {np.mean(results['episode_rewards'][-50:]):.2f}")
+
+    # Save trained model
+    model_path = models_dir / "temporal_ppo_lunarlander"
+    agent.save(str(model_path))
+    print(f"\nModel saved to: {model_path}")
+
     agent.close()
+
+    print("\nTo watch the trained agent:")
+    print(f"  uv run python scripts/watch.py --model {model_path}")
