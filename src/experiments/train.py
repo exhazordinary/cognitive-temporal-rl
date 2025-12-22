@@ -54,10 +54,16 @@ def run_experiment(config: ExperimentConfig, seed: int) -> dict:
             batch_size=config.ppo.batch_size,
             n_epochs=config.ppo.n_epochs,
             gamma=config.ppo.gamma,
+            ent_coef=config.ppo.ent_coef,
             window_size=config.entropy_clock.window_size,
             min_samples=config.entropy_clock.min_samples,
             use_salience_lr=config.use_salience_lr,
             use_salience_exploration=config.use_salience_exploration,
+            # LR modulator params
+            lr_gamma=config.modulators.lr_gamma,
+            lr_invert_direction=config.modulators.lr_invert_direction,
+            # Exploration modulator params
+            exploration_lambda=config.modulators.exploration_lambda,
             seed=seed,
             verbose=config.verbose,
         )

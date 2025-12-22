@@ -33,6 +33,7 @@ class ModulatorConfig:
     lr_gamma: float = 0.5
     lr_min_multiplier: float = 0.5
     lr_max_multiplier: float = 2.0
+    lr_invert_direction: bool = False  # If True, high salience decreases LR
 
     # Exploration modulator
     exploration_lambda: float = 0.3
@@ -71,30 +72,75 @@ class ExperimentConfig:
 
 # Predefined experiment configurations for ablation study
 EXPERIMENTS = {
+    # Baseline
     "baseline": ExperimentConfig(
         experiment_name="baseline",
         use_salience_replay=False,
         use_salience_lr=False,
         use_salience_exploration=False,
     ),
-    "salience_replay": ExperimentConfig(
-        experiment_name="salience_replay",
-        use_salience_replay=True,
-        use_salience_lr=False,
-        use_salience_exploration=False,
-    ),
+
+    # Original salience LR (gamma=0.5)
     "salience_lr": ExperimentConfig(
         experiment_name="salience_lr",
         use_salience_replay=False,
         use_salience_lr=True,
         use_salience_exploration=False,
     ),
+
+    # Gamma sweep experiments
+    "salience_lr_gamma_0.1": ExperimentConfig(
+        experiment_name="salience_lr_gamma_0.1",
+        use_salience_lr=True,
+        modulators=ModulatorConfig(lr_gamma=0.1),
+    ),
+    "salience_lr_gamma_0.2": ExperimentConfig(
+        experiment_name="salience_lr_gamma_0.2",
+        use_salience_lr=True,
+        modulators=ModulatorConfig(lr_gamma=0.2),
+    ),
+    "salience_lr_gamma_0.3": ExperimentConfig(
+        experiment_name="salience_lr_gamma_0.3",
+        use_salience_lr=True,
+        modulators=ModulatorConfig(lr_gamma=0.3),
+    ),
+
+    # Inverted hypothesis (high salience -> lower LR)
+    "salience_lr_inverted": ExperimentConfig(
+        experiment_name="salience_lr_inverted",
+        use_salience_lr=True,
+        modulators=ModulatorConfig(lr_invert_direction=True),
+    ),
+    "salience_lr_inverted_0.3": ExperimentConfig(
+        experiment_name="salience_lr_inverted_0.3",
+        use_salience_lr=True,
+        modulators=ModulatorConfig(lr_gamma=0.3, lr_invert_direction=True),
+    ),
+
+    # Exploration modulation
     "salience_exploration": ExperimentConfig(
         experiment_name="salience_exploration",
         use_salience_replay=False,
         use_salience_lr=False,
         use_salience_exploration=True,
     ),
+
+    # Combined (LR + exploration)
+    "salience_lr_exploration": ExperimentConfig(
+        experiment_name="salience_lr_exploration",
+        use_salience_lr=True,
+        use_salience_exploration=True,
+    ),
+
+    # Legacy: salience_replay (not implemented)
+    "salience_replay": ExperimentConfig(
+        experiment_name="salience_replay",
+        use_salience_replay=True,
+        use_salience_lr=False,
+        use_salience_exploration=False,
+    ),
+
+    # All modulators (replay not implemented)
     "all_modulators": ExperimentConfig(
         experiment_name="all_modulators",
         use_salience_replay=True,

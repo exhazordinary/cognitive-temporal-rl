@@ -18,6 +18,7 @@ class SalienceLR:
         min_multiplier: float = 0.5,
         max_multiplier: float = 2.0,
         baseline_momentum: float = 0.99,
+        invert_direction: bool = False,
     ):
         """Initialize the salience-based LR modulator.
 
@@ -27,12 +28,14 @@ class SalienceLR:
             min_multiplier: Minimum LR multiplier
             max_multiplier: Maximum LR multiplier
             baseline_momentum: EMA momentum for baseline salience
+            invert_direction: If True, high salience DECREASES LR (consolidate during chaos)
         """
         self.base_lr = base_lr
         self.gamma = gamma
         self.min_multiplier = min_multiplier
         self.max_multiplier = max_multiplier
         self.baseline_momentum = baseline_momentum
+        self.invert_direction = invert_direction
 
         self.baseline_salience: Optional[float] = None
         self.current_multiplier: float = 1.0
@@ -58,6 +61,8 @@ class SalienceLR:
 
         # Compute multiplier based on deviation from baseline
         deviation = salience_score - self.baseline_salience
+        if self.invert_direction:
+            deviation = -deviation  # High salience -> lower LR
         multiplier = 1.0 + self.gamma * deviation
 
         # Clamp to valid range

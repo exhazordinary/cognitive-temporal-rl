@@ -19,12 +19,14 @@ class TemporalCallback(BaseCallback):
         entropy_clock: EntropyClockModule,
         salience_lr: Optional[SalienceLR] = None,
         salience_exploration: Optional[SalienceExploration] = None,
+        base_ent_coef: float = 0.01,
         verbose: int = 0,
     ):
         super().__init__(verbose)
         self.entropy_clock = entropy_clock
         self.salience_lr = salience_lr
         self.salience_exploration = salience_exploration
+        self.base_ent_coef = base_ent_coef
 
         # Logging
         self.episode_rewards: list[float] = []
@@ -35,6 +37,14 @@ class TemporalCallback(BaseCallback):
         # Current episode tracking
         self._current_saliences: list[float] = []
 
+        # Step-level diagnostic logging
+        self.step_lr_history: list[float] = []
+        self.step_salience_history: list[float] = []
+        self.step_deviation_history: list[float] = []
+        self.step_multiplier_history: list[float] = []
+        self.step_entropy_history: list[float] = []
+        self.step_ent_coef_history: list[float] = []
+
     def _on_step(self) -> bool:
         # Get current observation
         obs = self.locals.get("new_obs")
@@ -43,12 +53,33 @@ class TemporalCallback(BaseCallback):
             state_tensor = torch.from_numpy(obs[0]).float()
             clock_output = self.entropy_clock.step(state_tensor)
 
+            # Log entropy
+            self.step_entropy_history.append(clock_output.entropy)
+            self.step_salience_history.append(clock_output.salience_score)
+
             # Modulate learning rate if enabled
             if self.salience_lr is not None:
+                # Compute deviation before updating
+                baseline = self.salience_lr.baseline_salience or clock_output.salience_score
+                deviation = clock_output.salience_score - baseline
+
                 self.salience_lr.update_optimizer_lr(
                     self.model.policy.optimizer,
                     clock_output.salience_score,
                 )
+
+                # Log LR diagnostics
+                self.step_lr_history.append(self.salience_lr.base_lr * self.salience_lr.current_multiplier)
+                self.step_deviation_history.append(deviation)
+                self.step_multiplier_history.append(self.salience_lr.current_multiplier)
+
+            # Modulate exploration via entropy coefficient if enabled
+            if self.salience_exploration is not None:
+                temperature = self.salience_exploration.get_temperature(clock_output.entropy)
+                # Scale ent_coef by temperature ratio (higher temp = more exploration)
+                new_ent_coef = self.base_ent_coef * temperature
+                self.model.ent_coef = new_ent_coef
+                self.step_ent_coef_history.append(new_ent_coef)
 
             self._current_saliences.append(clock_output.salience_score)
 
@@ -106,12 +137,18 @@ class TemporalPPO:
         batch_size: int = 64,
         n_epochs: int = 10,
         gamma: float = 0.99,
+        ent_coef: float = 0.01,
         # Entropy clock params
         window_size: int = 50,
         min_samples: int = 10,
         # Modulator toggles
         use_salience_lr: bool = False,
         use_salience_exploration: bool = False,
+        # LR modulator params
+        lr_gamma: float = 0.5,
+        lr_invert_direction: bool = False,
+        # Exploration modulator params
+        exploration_lambda: float = 0.3,
         # Other
         seed: Optional[int] = None,
         device: str = "auto",
@@ -126,10 +163,14 @@ class TemporalPPO:
             batch_size: Minibatch size
             n_epochs: Epochs per update
             gamma: Discount factor
+            ent_coef: Entropy coefficient for exploration
             window_size: Entropy clock window size
             min_samples: Minimum samples for entropy computation
             use_salience_lr: Enable LR modulation
             use_salience_exploration: Enable exploration modulation
+            lr_gamma: How strongly salience affects LR (0.5 = ±50%)
+            lr_invert_direction: If True, high salience decreases LR
+            exploration_lambda: Exploration temperature modulation strength
             seed: Random seed
             device: Device to use
             verbose: Verbosity level
@@ -137,6 +178,7 @@ class TemporalPPO:
         self.env_name = env_name
         self.seed = seed
         self.verbose = verbose
+        self.ent_coef = ent_coef
 
         # Create environment
         self.env = gym.make(env_name)
@@ -150,8 +192,14 @@ class TemporalPPO:
         )
 
         # Create modulators
-        self.salience_lr = SalienceLR(base_lr=learning_rate) if use_salience_lr else None
-        self.salience_exploration = SalienceExploration() if use_salience_exploration else None
+        self.salience_lr = SalienceLR(
+            base_lr=learning_rate,
+            gamma=lr_gamma,
+            invert_direction=lr_invert_direction,
+        ) if use_salience_lr else None
+        self.salience_exploration = SalienceExploration(
+            lambda_scale=exploration_lambda,
+        ) if use_salience_exploration else None
 
         # Create PPO model
         self.model = PPO(
@@ -162,6 +210,7 @@ class TemporalPPO:
             batch_size=batch_size,
             n_epochs=n_epochs,
             gamma=gamma,
+            ent_coef=ent_coef,
             seed=seed,
             device=device,
             verbose=0,
@@ -172,6 +221,7 @@ class TemporalPPO:
             entropy_clock=self.entropy_clock,
             salience_lr=self.salience_lr,
             salience_exploration=self.salience_exploration,
+            base_ent_coef=ent_coef,
             verbose=verbose,
         )
 
@@ -200,6 +250,15 @@ class TemporalPPO:
             "salience_exploration_stats": (
                 self.salience_exploration.get_stats() if self.salience_exploration else None
             ),
+            # Step-level diagnostics for analysis
+            "diagnostics": {
+                "step_lr_history": self.callback.step_lr_history,
+                "step_salience_history": self.callback.step_salience_history,
+                "step_deviation_history": self.callback.step_deviation_history,
+                "step_multiplier_history": self.callback.step_multiplier_history,
+                "step_entropy_history": self.callback.step_entropy_history,
+                "step_ent_coef_history": self.callback.step_ent_coef_history,
+            },
         }
 
     def save(self, path: str) -> None:
