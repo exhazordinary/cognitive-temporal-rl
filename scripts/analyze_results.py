@@ -19,10 +19,23 @@ from src.visualization.diagnostics import (
 )
 
 
-def load_results(results_path: str) -> dict:
-    """Load results from JSON file."""
-    with open(results_path) as f:
-        return json.load(f)
+def load_results(results_paths: list[str]) -> dict:
+    """Load and merge results from one or more JSON files.
+
+    Args:
+        results_paths: List of paths to result JSON files
+
+    Returns:
+        Merged results dictionary
+    """
+    merged = {}
+    for path in results_paths:
+        with open(path) as f:
+            data = json.load(f)
+            # Merge experiments, newer files overwrite older ones
+            for exp_name, exp_data in data.items():
+                merged[exp_name] = exp_data
+    return merged
 
 
 def print_summary(results: dict) -> None:
@@ -118,8 +131,9 @@ def main():
     parser.add_argument(
         "--results",
         type=str,
+        nargs="+",
         required=True,
-        help="Path to results JSON file",
+        help="Path(s) to results JSON file(s)",
     )
     parser.add_argument(
         "--output",
