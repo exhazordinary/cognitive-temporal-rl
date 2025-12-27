@@ -12,69 +12,154 @@ Standard RL agents treat every timestep equally. What if they didn't?
 
 ## The Hypothesis
 
-Use **entropy changes** in the agent's state representation as a proxy for "how surprising is this moment":
+Use **surprise (prediction error)** as a proxy for "how unexpected is this moment":
 
 ```
-High |ΔEntropy| = "Something novel happened"  = SALIENT MOMENT
-Low  |ΔEntropy| = "Business as usual"         = ROUTINE MOMENT
+High Prediction Error = "Something unexpected"  = SURPRISING
+Low  Prediction Error = "As expected"           = ROUTINE
 ```
 
-Then modulate training based on salience:
-- **Learn more** from surprising moments
-- **Learn less** from routine moments
+Then modulate learning rate based on surprise using Pearce-Hall dynamics:
+- **Pearce-Hall mode:** High surprise → higher LR (learn more from surprises)
+- **Stabilization mode:** High surprise → lower LR (consolidate during chaos)
 
-Expected benefits: faster learning, better sample efficiency, more robust policies.
+## Theoretical Foundation
 
-## Architecture
+Based on:
+1. **SurNoR (2021):** Separates novelty (exploration) from surprise (learning rate modulation)
+2. **Pearce-Hall (1980):** Associability α updated by prediction error: `α = γ|PE| + (1-γ)α`
+3. **RND/ICM:** Prediction error as novelty signal (we use for LR, not just rewards)
+
+## Architecture (v2 - SurNoR-inspired)
 
 ```
 State observation
        ↓
 ┌─────────────────────────────────────┐
-│      Entropy Clock Module           │
-│  Computes entropy over state window │
-│  Outputs: salience_score, Δentropy  │
+│      Forward Model                  │
+│  Predicts next state from (s, a)    │
+│  Prediction error = Surprise        │
 └─────────────────────────────────────┘
        ↓
 ┌─────────────────────────────────────┐
-│      Salience Modulators            │
-│  • Learning Rate modulation         │
-│  • Exploration/exploitation balance │
-│  • Experience replay prioritization │
+│      Surprise Module                │
+│  • Pearce-Hall smoothing            │
+│  • Computes associability α         │
+│  • Aggregates over rollout          │
+└─────────────────────────────────────┘
+       ↓ (at PPO update time!)
+┌─────────────────────────────────────┐
+│      Pearce-Hall LR Modulator       │
+│  • Modulates LR based on α          │
+│  • Applied once per update          │
 └─────────────────────────────────────┘
        ↓
 ┌─────────────────────────────────────┐
 │      PPO Agent (LunarLander)        │
-│  Training with modulated parameters │
+│  Training with modulated LR         │
 └─────────────────────────────────────┘
 ```
 
-## Current Findings
+**Key Fix:** LR modulation happens at PPO UPDATE time (after rollout), not per-step!
 
-### Experiment: Baseline vs Salience LR (5 seeds, 200k timesteps)
+## Current Status
+
+### Original Approach (Entropy-based) - FAILED
 
 | Condition | Mean Final Reward | Std Dev |
 |-----------|-------------------|---------|
 | **Baseline PPO** | **151.27** | 51.77 |
 | Salience LR | 70.35 | 77.27 |
 
-**Result:** Baseline wins. The current salience LR implementation hurts performance.
+**Why it failed:** See `docs/RESEARCH_SYNTHESIS.md` for detailed analysis.
 
-### Interpretation
+### New Approach (SurNoR-inspired) - PRELIMINARY RESULTS
 
-The hypothesis as currently implemented doesn't work. Possible reasons:
-1. LR modulation too aggressive (γ=0.5 might be too strong)
-2. Per-step modulation too noisy (should modulate per-episode?)
-3. Direction might be wrong (high salience should *decrease* LR to stabilize?)
-4. The hypothesis itself might not apply to PPO
+| Experiment | Mean Final Reward | Std Dev |
+|------------|-------------------|---------|
+| Baseline PPO | -7.93 | 49.25 |
+| Pearce-Hall (high surprise → high LR) | -3.47 | 47.64 |
+| **Stabilization (high surprise → low LR)** | **2.59** | **45.19** |
 
-### Next Steps
-- [ ] Tune hyperparameters (try γ=0.1, 0.2, 0.3)
-- [ ] Test other modulators (exploration, replay)
-- [ ] Try inverting the hypothesis
-- [ ] Analyze when/why it diverges
+*5 runs × 100k timesteps, random seeds*
+
+**Key Finding:** The **stabilization approach** (inverting Pearce-Hall) performs best. When the environment is surprising/chaotic, decreasing the learning rate helps consolidate learning rather than amplifying noise.
+
+This contradicts the Pearce-Hall prediction but aligns with the "uncertainty-weighted learning" literature (Gershman 2022).
+
+**Note:** High variance suggests more runs needed for statistical significance.
+
+## Key Files
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Forward Model | `src/surprise/forward_model.py` | Predicts next state, computes PE |
+| Surprise Module | `src/surprise/surprise_module.py` | Pearce-Hall smoothing, rollout aggregation |
+| Pearce-Hall LR | `src/modulators/pearce_hall_lr.py` | LR modulation at update time |
+| SurNoR PPO | `src/agents/surnor_ppo.py` | Fixed PPO with proper timing |
+| Experiments | `src/experiments/run_surnor.py` | New experiment runner |
+| Research | `docs/RESEARCH_SYNTHESIS.md` | Full literature review |
 
 ## Quick Start
+
+```bash
+# Setup
+cd cognitive-temporal-rl
+uv venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
+
+# Run new SurNoR experiments
+uv run python -m src.experiments.run_surnor --experiments baseline surnor_pearce_hall surnor_stabilize
+
+# Quick test (fewer timesteps)
+uv run python -m src.experiments.run_surnor --experiments baseline surnor_pearce_hall --timesteps 50000 --seeds 3
+
+# Run tests
+uv run pytest tests/ -v
+```
+
+## Project Structure
+
+```
+cognitive-temporal-rl/
+├── src/
+│   ├── surprise/                 # NEW: Prediction error based surprise
+│   │   ├── forward_model.py      # Predicts next state
+│   │   └── surprise_module.py    # Pearce-Hall smoothing
+│   ├── entropy_clock/            # LEGACY: Entropy-based approach
+│   │   ├── clock.py              # EntropyClockModule
+│   │   └── buffers.py            # Rolling state buffer
+│   ├── modulators/
+│   │   ├── pearce_hall_lr.py     # NEW: Fixed LR modulation
+│   │   ├── learning_rate.py      # LEGACY: Per-step LR (broken)
+│   │   └── exploration.py        # Exploration modulation
+│   ├── agents/
+│   │   ├── surnor_ppo.py         # NEW: Fixed PPO with proper timing
+│   │   ├── temporal_ppo.py       # LEGACY: Original (has timing bug)
+│   │   └── base_ppo.py           # Vanilla PPO baseline
+│   └── experiments/
+│       ├── run_surnor.py         # NEW: SurNoR experiment runner
+│       ├── surnor_config.py      # NEW: SurNoR configurations
+│       ├── train.py              # LEGACY: Original runner
+│       └── config.py             # LEGACY: Original configs
+├── docs/
+│   ├── RESEARCH_SYNTHESIS.md     # Literature review & analysis
+│   └── FINDINGS.md               # Original experiment findings
+├── results/                      # Experiment outputs (JSON)
+└── tests/
+```
+
+## References
+
+- **SurNoR:** [Novelty is not surprise (2021)](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1009070)
+- **Pearce-Hall:** [Prediction errors, attention and associative learning](https://pmc.ncbi.nlm.nih.gov/articles/PMC4862921/)
+- **RND:** [Exploration by Random Network Distillation (2018)](https://arxiv.org/abs/1810.12894)
+- **ICM:** [Curiosity-driven Exploration (2017)](https://arxiv.org/abs/1705.05363)
+- **PPO:** [Proximal Policy Optimization](https://arxiv.org/abs/1707.06347)
+
+---
+
+## Legacy Quick Start (Original Approach)
 
 ```bash
 # Setup
