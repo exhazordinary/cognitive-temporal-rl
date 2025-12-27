@@ -117,6 +117,7 @@ State observation
 | Experiments | `src/experiments/run_surnor.py` | Experiment runner |
 | Theory | `docs/THEORETICAL_FOUNDATION.md` | Why stabilization works |
 | Research | `docs/RESEARCH_SYNTHESIS.md` | Full literature review |
+| Future Work | `docs/FUTURE_WORK.md` | Next research directions |
 
 ## Quick Start
 
