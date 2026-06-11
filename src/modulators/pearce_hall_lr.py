@@ -5,7 +5,7 @@ Based on Pearce & Hall (1980) and SurNoR (2021):
 - α_t = γ|PE| + (1-γ)α_{t-1}
 - High surprise -> increased learning rate (or decreased, configurable)
 
-Key difference from SalienceLR:
+Key difference from the legacy SalienceLR (see legacy/modulators/):
 - Applies modulation per-rollout, not per-step
 - Uses proper Pearce-Hall smoothing
 - Designed for PPO update phase, not experience collection

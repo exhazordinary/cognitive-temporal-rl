@@ -5,7 +5,7 @@ Based on:
 - Pearce-Hall (1980): Associability modulated by prediction error
 - RND (2018): Prediction error normalization techniques
 
-Key fixes from original temporal_ppo.py:
+Key fixes from the original approach (see legacy/temporal_ppo.py):
 1. LR modulation happens at PPO UPDATE time, not during rollout
 2. Uses prediction error (forward model) instead of state entropy
 3. Pearce-Hall smoothing prevents per-step jitter

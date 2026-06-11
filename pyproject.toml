@@ -23,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-train = "src.experiments.train:main"
+run-surnor = "src.experiments.run_surnor:main"
 
 [build-system]
 requires = ["hatchling"]
