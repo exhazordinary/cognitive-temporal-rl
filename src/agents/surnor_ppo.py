@@ -21,8 +21,10 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from typing import Optional, Dict, Any, List
 
-from ..surprise import SurpriseModule
+from ..surprise import SurpriseModule, VolatilityDetector
 from ..modulators.pearce_hall_lr import PearceHallLR
+
+LR_MODES = ("none", "pearce_hall", "stabilize", "adaptive")
 
 
 class MutableLRSchedule:
@@ -53,15 +55,25 @@ class SurNoRCallback(BaseCallback):
     def __init__(
         self,
         surprise_module: SurpriseModule,
+        lr_mode: str = "pearce_hall",
         lr_modulator: Optional[PearceHallLR] = None,
+        volatility_detector: Optional[VolatilityDetector] = None,
         lr_schedule: Optional[MutableLRSchedule] = None,
+        base_lr: float = 3e-4,
+        lr_min_multiplier: float = 0.5,
+        lr_max_multiplier: float = 2.0,
         intrinsic_reward_scale: float = 0.0,  # 0 = disabled
         verbose: int = 0,
     ):
         super().__init__(verbose)
         self.surprise_module = surprise_module
+        self.lr_mode = lr_mode
         self.lr_modulator = lr_modulator
+        self.volatility_detector = volatility_detector
         self.lr_schedule = lr_schedule
+        self.base_lr = base_lr
+        self.lr_min_multiplier = lr_min_multiplier
+        self.lr_max_multiplier = lr_max_multiplier
         self.intrinsic_reward_scale = intrinsic_reward_scale
 
         # Episode tracking
@@ -72,6 +84,9 @@ class SurNoRCallback(BaseCallback):
         # Per-update tracking
         self.update_alphas: List[float] = []
         self.update_lrs: List[float] = []
+        self.update_volatility: List[float] = []
+        self.update_noise: List[float] = []
+        self.update_change_points: List[int] = []
 
     def _on_step(self) -> bool:
         """Called after each vectorized environment step during rollout.
@@ -100,6 +115,10 @@ class SurNoRCallback(BaseCallback):
 
         output = self.surprise_module.step_batch(prev_obs, actions, next_states)
 
+        # Feed the volatility detector one signed PE per vec-step
+        if self.volatility_detector is not None:
+            self.volatility_detector.step(float(np.mean(output.surprises)))
+
         # Optional: add intrinsic reward bonus (in-place so the modified
         # rewards reach the rollout buffer / GAE computation)
         if self.intrinsic_reward_scale > 0:
@@ -126,25 +145,36 @@ class SurNoRCallback(BaseCallback):
 
         THIS is the right time to modulate learning rate!
         """
-        if self.lr_modulator is None:
-            return
-
         # Get rollout statistics
         stats = self.surprise_module.get_rollout_stats()
         alpha = stats["alpha"]
+        self.update_alphas.append(alpha)
+
+        if self.lr_mode == "adaptive":
+            # Volatility detected -> boost LR; noise-dominated -> reduce LR
+            multiplier = self.volatility_detector.get_rollout_recommendation()
+            multiplier = float(np.clip(multiplier, self.lr_min_multiplier, self.lr_max_multiplier))
+            new_lr = self.base_lr * multiplier
+
+            det_stats = self.volatility_detector.get_stats()
+            self.update_volatility.append(float(det_stats["mean_volatility"]))
+            self.update_noise.append(float(det_stats["mean_noise"]))
+            self.update_change_points.append(int(det_stats["n_change_points"]))
+        elif self.lr_mode in ("pearce_hall", "stabilize"):
+            new_lr = self.lr_modulator.compute_lr(alpha)
+        else:
+            # "none": leave the schedule at its base value
+            self.surprise_module.clear_rollout()
+            return
 
         # Write the modulated LR into the schedule; SB3's
         # _update_learning_rate() applies it at the start of train().
-        new_lr = self.lr_modulator.compute_lr(alpha)
         if self.lr_schedule is not None:
             self.lr_schedule.current_lr = new_lr
-
-        # Track
-        self.update_alphas.append(alpha)
         self.update_lrs.append(new_lr)
 
         if self.verbose > 0:
-            print(f"  [SurNoR] Rollout alpha={alpha:.3f}, LR={new_lr:.6f}")
+            print(f"  [SurNoR] Rollout alpha={alpha:.3f}, LR={new_lr:.6f} ({self.lr_mode})")
 
         # Clear rollout accumulator
         self.surprise_module.clear_rollout()
@@ -188,10 +218,16 @@ class SurNoRPPO:
         forward_model_lr: float = 1e-3,
         forward_hidden_dim: int = 64,
         # LR modulation params
-        use_lr_modulation: bool = True,
+        lr_mode: str = "pearce_hall",  # none | pearce_hall | stabilize | adaptive
         lr_min_multiplier: float = 0.5,
         lr_max_multiplier: float = 2.0,
-        invert_lr: bool = False,
+        # Volatility detector params (adaptive mode only)
+        vol_window_short: int = 20,
+        vol_window_long: int = 100,
+        vol_change_threshold: float = 2.0,
+        vol_noise_sensitivity: float = 0.5,
+        vol_volatility_boost: float = 0.5,
+        vol_rollout_window: int = 50,
         # Intrinsic reward (optional, set > 0 to enable)
         intrinsic_reward_scale: float = 0.0,
         # Other
@@ -233,13 +269,29 @@ class SurNoRPPO:
             model_lr=forward_model_lr,
         )
 
-        # Create LR modulator
+        if lr_mode not in LR_MODES:
+            raise ValueError(f"Unknown lr_mode: {lr_mode!r}. Valid modes: {LR_MODES}")
+        self.lr_mode = lr_mode
+
+        # Create LR modulator (Pearce-Hall directions only)
         self.lr_modulator = PearceHallLR(
             base_lr=learning_rate,
             min_multiplier=lr_min_multiplier,
             max_multiplier=lr_max_multiplier,
-            invert=invert_lr,
-        ) if use_lr_modulation else None
+            invert=(lr_mode == "stabilize"),
+        ) if lr_mode in ("pearce_hall", "stabilize") else None
+
+        # Create volatility detector (adaptive mode only)
+        self.volatility_detector = VolatilityDetector(
+            window_short=vol_window_short,
+            window_long=vol_window_long,
+            change_threshold=vol_change_threshold,
+            noise_sensitivity=vol_noise_sensitivity,
+            volatility_boost=vol_volatility_boost,
+            min_multiplier=lr_min_multiplier,
+            max_multiplier=lr_max_multiplier,
+            rollout_window=vol_rollout_window,
+        ) if lr_mode == "adaptive" else None
 
         # Mutable schedule: the callback writes the modulated LR here and
         # SB3 applies it at the start of each train() call.
@@ -263,8 +315,13 @@ class SurNoRPPO:
         # Create callback
         self.callback = SurNoRCallback(
             surprise_module=self.surprise_module,
+            lr_mode=lr_mode,
             lr_modulator=self.lr_modulator,
+            volatility_detector=self.volatility_detector,
             lr_schedule=self.lr_schedule,
+            base_lr=learning_rate,
+            lr_min_multiplier=lr_min_multiplier,
+            lr_max_multiplier=lr_max_multiplier,
             intrinsic_reward_scale=intrinsic_reward_scale,
             verbose=verbose,
         )
@@ -283,8 +340,14 @@ class SurNoRPPO:
             "episode_surprises": self.callback.episode_surprises,
             "update_alphas": self.callback.update_alphas,
             "update_lrs": self.callback.update_lrs,
+            "update_volatility": self.callback.update_volatility,
+            "update_noise": self.callback.update_noise,
+            "update_change_points": self.callback.update_change_points,
             "surprise_stats": self.surprise_module.get_stats(),
             "lr_stats": self.lr_modulator.get_stats() if self.lr_modulator else None,
+            "volatility_stats": (
+                self.volatility_detector.get_stats() if self.volatility_detector else None
+            ),
         }
 
     def save(self, path: str) -> None:
@@ -302,8 +365,7 @@ if __name__ == "__main__":
     print("Testing SurNoR PPO...")
 
     agent = SurNoRPPO(
-        use_lr_modulation=True,
-        invert_lr=False,  # Pearce-Hall: high surprise -> high LR
+        lr_mode="pearce_hall",  # high surprise -> high LR
         pearce_hall_gamma=0.3,
         seed=42,
         verbose=1,

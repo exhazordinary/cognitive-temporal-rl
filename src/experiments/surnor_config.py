@@ -37,11 +37,22 @@ class SurNoRConfig:
     forward_model_lr: float = 1e-3
     forward_hidden_dim: int = 64
 
-    # LR modulation
-    use_lr_modulation: bool = True
+    # LR modulation mode:
+    #   none        - no modulation (baseline; forward model still trains)
+    #   pearce_hall - high surprise -> higher LR
+    #   stabilize   - high surprise -> lower LR
+    #   adaptive    - volatility detector picks the direction per rollout
+    lr_mode: str = "pearce_hall"
     lr_min_multiplier: float = 0.5
     lr_max_multiplier: float = 2.0
-    invert_lr: bool = False  # False = Pearce-Hall, True = Stabilization
+
+    # Volatility detector (adaptive mode only)
+    vol_window_short: int = 20
+    vol_window_long: int = 100
+    vol_change_threshold: float = 2.0
+    vol_noise_sensitivity: float = 0.5
+    vol_volatility_boost: float = 0.5
+    vol_rollout_window: int = 50
 
     # Intrinsic reward
     intrinsic_reward_scale: float = 0.0  # 0 = disabled
@@ -56,7 +67,7 @@ SURNOR_EXPERIMENTS = {
     # Baseline: No modulation (just forward model training)
     "baseline": SurNoRConfig(
         experiment_name="baseline",
-        use_lr_modulation=False,
+        lr_mode="none",
         intrinsic_reward_scale=0.0,
     ),
 
@@ -65,22 +76,19 @@ SURNOR_EXPERIMENTS = {
 
     "surnor_pearce_hall": SurNoRConfig(
         experiment_name="surnor_pearce_hall",
-        use_lr_modulation=True,
-        invert_lr=False,
+        lr_mode="pearce_hall",
         pearce_hall_gamma=0.3,
     ),
 
     "surnor_ph_gamma_0.1": SurNoRConfig(
         experiment_name="surnor_ph_gamma_0.1",
-        use_lr_modulation=True,
-        invert_lr=False,
+        lr_mode="pearce_hall",
         pearce_hall_gamma=0.1,  # Slower adaptation
     ),
 
     "surnor_ph_gamma_0.5": SurNoRConfig(
         experiment_name="surnor_ph_gamma_0.5",
-        use_lr_modulation=True,
-        invert_lr=False,
+        lr_mode="pearce_hall",
         pearce_hall_gamma=0.5,  # Faster adaptation
     ),
 
@@ -89,16 +97,30 @@ SURNOR_EXPERIMENTS = {
 
     "surnor_stabilize": SurNoRConfig(
         experiment_name="surnor_stabilize",
-        use_lr_modulation=True,
-        invert_lr=True,
+        lr_mode="stabilize",
         pearce_hall_gamma=0.3,
     ),
 
     "surnor_stab_gamma_0.1": SurNoRConfig(
         experiment_name="surnor_stab_gamma_0.1",
-        use_lr_modulation=True,
-        invert_lr=True,
+        lr_mode="stabilize",
         pearce_hall_gamma=0.1,
+    ),
+
+    # ===== ADAPTIVE: VOLATILITY VS NOISE =====
+    # Detector picks the direction: change points -> boost LR,
+    # noise-dominated -> reduce LR (Gershman 2020)
+
+    "surnor_adaptive": SurNoRConfig(
+        experiment_name="surnor_adaptive",
+        lr_mode="adaptive",
+    ),
+
+    "surnor_adaptive_sensitive": SurNoRConfig(
+        experiment_name="surnor_adaptive_sensitive",
+        lr_mode="adaptive",
+        vol_change_threshold=1.5,  # Easier to trigger change points
+        vol_volatility_boost=1.0,  # Stronger LR boost on volatility
     ),
 
     # ===== HYBRID: LR + INTRINSIC REWARD =====
@@ -106,14 +128,13 @@ SURNOR_EXPERIMENTS = {
 
     "surnor_hybrid": SurNoRConfig(
         experiment_name="surnor_hybrid",
-        use_lr_modulation=True,
-        invert_lr=False,
+        lr_mode="pearce_hall",
         intrinsic_reward_scale=0.01,  # Small intrinsic bonus
     ),
 
     "surnor_intrinsic_only": SurNoRConfig(
         experiment_name="surnor_intrinsic_only",
-        use_lr_modulation=False,
+        lr_mode="none",
         intrinsic_reward_scale=0.01,
     ),
 
@@ -121,16 +142,14 @@ SURNOR_EXPERIMENTS = {
 
     "surnor_narrow_range": SurNoRConfig(
         experiment_name="surnor_narrow_range",
-        use_lr_modulation=True,
-        invert_lr=False,
+        lr_mode="pearce_hall",
         lr_min_multiplier=0.8,
         lr_max_multiplier=1.2,  # Only ±20%
     ),
 
     "surnor_wide_range": SurNoRConfig(
         experiment_name="surnor_wide_range",
-        use_lr_modulation=True,
-        invert_lr=False,
+        lr_mode="pearce_hall",
         lr_min_multiplier=0.25,
         lr_max_multiplier=4.0,  # ±4x
     ),

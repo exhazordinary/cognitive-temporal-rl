@@ -39,6 +39,7 @@ class VolatilityDetector:
         volatility_boost: float = 0.5,   # How much volatility boosts LR
         min_multiplier: float = 0.5,
         max_multiplier: float = 2.0,
+        rollout_window: int = 50,        # Steps considered by rollout recommendation
     ):
         """Initialize volatility detector.
 
@@ -50,6 +51,7 @@ class VolatilityDetector:
             volatility_boost: How strongly volatility increases LR
             min_multiplier: Minimum LR multiplier
             max_multiplier: Maximum LR multiplier
+            rollout_window: How many recent steps get_rollout_recommendation uses
         """
         self.window_short = window_short
         self.window_long = window_long
@@ -58,6 +60,7 @@ class VolatilityDetector:
         self.volatility_boost = volatility_boost
         self.min_multiplier = min_multiplier
         self.max_multiplier = max_multiplier
+        self.rollout_window = rollout_window
 
         # Prediction error history
         self.pe_history: deque = deque(maxlen=window_long)
@@ -168,7 +171,7 @@ class VolatilityDetector:
         if not self.volatility_history:
             return 1.0
 
-        recent_n = min(50, len(self.volatility_history))
+        recent_n = min(self.rollout_window, len(self.volatility_history))
 
         # Check if any change points in recent history
         recent_changes = sum(1 for cp in self.change_points if cp > self.step_count - recent_n)
