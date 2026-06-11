@@ -17,6 +17,8 @@ import numpy as np
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from typing import Optional, Dict, Any, List
 
 from ..surprise import SurpriseModule
@@ -71,64 +73,51 @@ class SurNoRCallback(BaseCallback):
         self.update_alphas: List[float] = []
         self.update_lrs: List[float] = []
 
-        # Step tracking
-        self._prev_obs: Optional[np.ndarray] = None
-        self._prev_action: Optional[int] = None
-
-    def _on_training_start(self) -> None:
-        """Called before training starts."""
-        self._prev_obs = None
-        self._prev_action = None
-
     def _on_step(self) -> bool:
-        """Called after each environment step during rollout.
+        """Called after each vectorized environment step during rollout.
 
         We collect surprise here but DO NOT modulate LR yet.
+
+        At this point in SB3's collect_rollouts, ``self.model._last_obs``
+        still holds the PRE-step observations (it is reassigned to new_obs
+        only after the callback returns), so the correctly paired batched
+        transition (s_t, a_t, s_{t+1}) is available without tracking state.
         """
-        # Get transition data
-        new_obs = self.locals.get("new_obs")
-        actions = self.locals.get("actions")
-        rewards = self.locals.get("rewards")
-        dones = self.locals.get("dones")
+        prev_obs = self.model._last_obs            # (n_envs, obs_dim)
+        actions = self.locals["actions"]           # (n_envs,)
+        new_obs = self.locals["new_obs"]
+        dones = self.locals["dones"]
+        infos = self.locals["infos"]
 
-        if new_obs is not None and self._prev_obs is not None:
-            # Compute surprise for this transition
-            state = torch.from_numpy(self._prev_obs[0]).float()
-            action = torch.tensor(self._prev_action)
-            next_state = torch.from_numpy(new_obs[0]).float()
+        # On done steps, SB3 VecEnvs auto-reset: new_obs is the NEXT
+        # episode's reset obs. The true terminal obs lives in infos.
+        next_states = np.array(new_obs, copy=True)
+        for idx, done in enumerate(dones):
+            if done:
+                terminal_obs = infos[idx].get("terminal_observation")
+                if terminal_obs is not None:
+                    next_states[idx] = terminal_obs
 
-            output = self.surprise_module.step(state, action, next_state)
+        output = self.surprise_module.step_batch(prev_obs, actions, next_states)
 
-            # Optional: add intrinsic reward bonus
-            if self.intrinsic_reward_scale > 0:
-                intrinsic = output.surprise * self.intrinsic_reward_scale
-                # Note: modifying rewards in-place for SB3
-                # This affects the rewards used in GAE computation
-                self.locals["rewards"][0] += intrinsic
-
-        # Store for next transition
-        if new_obs is not None:
-            self._prev_obs = new_obs.copy()
-        if actions is not None:
-            self._prev_action = actions[0]
+        # Optional: add intrinsic reward bonus (in-place so the modified
+        # rewards reach the rollout buffer / GAE computation)
+        if self.intrinsic_reward_scale > 0:
+            self.locals["rewards"] += self.intrinsic_reward_scale * output.surprises
 
         # Handle episode completion
-        if dones is not None:
-            for idx, done in enumerate(dones):
-                if done:
-                    infos = self.locals.get("infos", [])
-                    if idx < len(infos) and "episode" in infos[idx]:
-                        ep_info = infos[idx]["episode"]
-                        self.episode_rewards.append(ep_info["r"])
-                        self.episode_lengths.append(ep_info["l"])
+        for idx, done in enumerate(dones):
+            if done:
+                if "episode" in infos[idx]:
+                    ep_info = infos[idx]["episode"]
+                    self.episode_rewards.append(ep_info["r"])
+                    self.episode_lengths.append(ep_info["l"])
 
-                        # Mean surprise for this episode
-                        stats = self.surprise_module.get_rollout_stats()
-                        self.episode_surprises.append(stats["mean_surprise"])
+                    # Mean surprise for this episode
+                    stats = self.surprise_module.get_rollout_stats()
+                    self.episode_surprises.append(stats["mean_surprise"])
 
-                    self.surprise_module.reset_episode()
-                    self._prev_obs = None
-                    self._prev_action = None
+                self.surprise_module.reset_episode()
 
         return True
 
@@ -184,9 +173,12 @@ class SurNoRPPO:
     def __init__(
         self,
         env_name: str = "LunarLander-v3",
+        # Vectorization
+        n_envs: int = 8,
+        vec_env_type: str = "dummy",  # "dummy" or "subproc"
         # PPO params
         learning_rate: float = 3e-4,
-        n_steps: int = 2048,
+        n_steps_total: int = 2048,  # rollout size in env-steps, split across envs
         batch_size: int = 64,
         n_epochs: int = 10,
         gamma: float = 0.99,
@@ -210,13 +202,22 @@ class SurNoRPPO:
         self.env_name = env_name
         self.seed = seed
         self.verbose = verbose
+        self.n_envs = n_envs
 
-        # Create environment
-        self.env = gym.make(env_name)
-        if seed is not None:
-            self.env.reset(seed=seed)
+        # SB3's n_steps is PER ENV; keep the rollout size (and therefore the
+        # number of PPO updates and LR modulations) constant in env-steps.
+        self.n_steps_per_env = max(64, n_steps_total // n_envs)
+        if verbose > 0 and self.n_steps_per_env * n_envs != n_steps_total:
+            print(f"  [SurNoR] n_steps_total={n_steps_total} adjusted to "
+                  f"{self.n_steps_per_env * n_envs} ({self.n_steps_per_env} x {n_envs} envs)")
 
-        # Get dimensions
+        # Create vectorized environment. DummyVecEnv is the default: for
+        # cheap envs the speedup comes from batching policy forward passes,
+        # and SubprocVecEnv IPC overhead can exceed the env step cost.
+        vec_env_cls = SubprocVecEnv if vec_env_type == "subproc" else DummyVecEnv
+        self.env = make_vec_env(env_name, n_envs=n_envs, seed=seed, vec_env_cls=vec_env_cls)
+
+        # Get dimensions (VecEnv exposes the single-env spaces)
         state_dim = self.env.observation_space.shape[0]
         if hasattr(self.env.action_space, 'n'):
             action_dim = self.env.action_space.n
@@ -249,7 +250,7 @@ class SurNoRPPO:
             "MlpPolicy",
             self.env,
             learning_rate=self.lr_schedule,
-            n_steps=n_steps,
+            n_steps=self.n_steps_per_env,
             batch_size=batch_size,
             n_epochs=n_epochs,
             gamma=gamma,

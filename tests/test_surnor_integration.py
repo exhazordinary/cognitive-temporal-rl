@@ -6,6 +6,7 @@ callback wrote the modulated LR directly into the optimizer, only for SB3's
 gradient step.
 """
 
+import numpy as np
 import pytest
 
 from src.agents.surnor_ppo import SurNoRPPO
@@ -16,7 +17,8 @@ def trained_agent():
     """Short training run on CartPole (cheap, no box2d needed)."""
     agent = SurNoRPPO(
         env_name="CartPole-v1",
-        n_steps=256,
+        n_envs=2,
+        n_steps_total=256,
         batch_size=64,
         use_lr_modulation=True,
         invert_lr=False,
@@ -49,3 +51,38 @@ def test_modulation_actually_changes_lr(trained_agent):
 
 def test_episode_stats_collected(trained_agent):
     assert len(trained_agent.callback.episode_rewards) > 0
+
+
+def test_surprise_counted_in_env_steps(trained_agent):
+    """The surprise module sees every env transition (n_envs per vec-step)."""
+    assert trained_agent.surprise_module.step_count == 1024
+
+
+def test_last_obs_is_pre_step_observation():
+    """Guard the semi-private SB3 API the callback relies on:
+    inside _on_step, model._last_obs must still hold the PRE-step
+    observations (differing from new_obs on at least one step)."""
+    from stable_baselines3.common.callbacks import BaseCallback
+
+    class ProbeCallback(BaseCallback):
+        def __init__(self):
+            super().__init__()
+            self.saw_difference = False
+
+        def _on_step(self) -> bool:
+            if not np.array_equal(self.model._last_obs, self.locals["new_obs"]):
+                self.saw_difference = True
+            return True
+
+    agent = SurNoRPPO(
+        env_name="CartPole-v1",
+        n_envs=2,
+        n_steps_total=128,
+        seed=1,
+        device="cpu",
+    )
+    probe = ProbeCallback()
+    agent.model.learn(total_timesteps=128, callback=probe)
+    agent.close()
+
+    assert probe.saw_difference

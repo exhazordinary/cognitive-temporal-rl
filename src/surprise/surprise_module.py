@@ -13,6 +13,13 @@ class SurpriseOutput(NamedTuple):
     raw_error: float             # Raw MSE
 
 
+class BatchSurpriseOutput(NamedTuple):
+    """Output from batched surprise computation (one row per parallel env)."""
+    surprises: np.ndarray        # Normalized prediction errors (n,)
+    alpha: float                 # Pearce-Hall associability after this vec-step
+    raw_errors: np.ndarray       # Raw MSEs (n,)
+
+
 class SurpriseModule:
     """Computes surprise via prediction error with Pearce-Hall smoothing.
 
@@ -84,7 +91,9 @@ class SurpriseModule:
         action: torch.Tensor,
         next_state: torch.Tensor,
     ) -> SurpriseOutput:
-        """Process a transition and compute surprise.
+        """Process a single transition and compute surprise.
+
+        Thin wrapper over step_batch with batch size 1.
 
         Args:
             state: Current state
@@ -94,44 +103,79 @@ class SurpriseModule:
         Returns:
             SurpriseOutput with surprise and smoothed associability
         """
-        self.step_count += 1
-
-        # Store transition for training
-        self.transition_buffer.append((
-            state.detach().clone(),
-            action.detach().clone() if isinstance(action, torch.Tensor) else torch.tensor(action),
-            next_state.detach().clone(),
-        ))
-        if len(self.transition_buffer) > self.max_buffer_size:
-            self.transition_buffer.pop(0)
-
-        # Compute surprise (prediction error)
-        surprise, raw_error = self.forward_model.compute_surprise(
-            state,
-            action if isinstance(action, torch.Tensor) else torch.tensor(action),
-            next_state,
+        state = torch.as_tensor(state, dtype=torch.float32)
+        next_state = torch.as_tensor(next_state, dtype=torch.float32)
+        out = self.step_batch(
+            state.unsqueeze(0),
+            torch.as_tensor(action).reshape(1),
+            next_state.unsqueeze(0),
+        )
+        return SurpriseOutput(
+            surprise=float(out.surprises[0]),
+            smoothed_surprise=out.alpha,
+            raw_error=float(out.raw_errors[0]),
         )
 
-        # Pearce-Hall update: α = γ|PE| + (1-γ)α
-        # Using absolute surprise (unsigned prediction error)
-        abs_surprise = abs(surprise)
-        self.alpha = self.gamma * abs_surprise + (1 - self.gamma) * self.alpha
+    def step_batch(
+        self,
+        states,
+        actions,
+        next_states,
+    ) -> BatchSurpriseOutput:
+        """Process one vectorized-env step (n parallel transitions).
+
+        Pearce-Hall smoothing is updated ONCE per vec-step using the mean
+        absolute prediction error across envs, so alpha stays a single
+        scalar signal regardless of n_envs. Note this means gamma is
+        denominated in vec-steps: with n_envs parallel envs, alpha receives
+        n_envs times fewer updates per env-step than a single-env run.
+
+        Args:
+            states: Pre-step observations (n, state_dim), array or tensor
+            actions: Actions taken (n,)
+            next_states: Resulting observations (n, state_dim)
+
+        Returns:
+            BatchSurpriseOutput with per-env surprises and updated alpha
+        """
+        states = torch.as_tensor(np.asarray(states), dtype=torch.float32)
+        actions = torch.as_tensor(np.asarray(actions)).long().flatten()
+        next_states = torch.as_tensor(np.asarray(next_states), dtype=torch.float32)
+        n = states.shape[0]
+
+        self.step_count += n
+
+        # Store transitions for forward model training
+        for i in range(n):
+            self.transition_buffer.append((states[i], actions[i], next_states[i]))
+        if len(self.transition_buffer) > self.max_buffer_size:
+            del self.transition_buffer[:len(self.transition_buffer) - self.max_buffer_size]
+
+        # Compute surprise (prediction error) in one forward pass
+        surprises, raw_errors = self.forward_model.compute_surprise_batch(
+            states, actions, next_states,
+        )
+
+        # Pearce-Hall update: α = γ·mean|PE| + (1-γ)α, once per vec-step
+        pe = float(np.mean(np.abs(surprises)))
+        self.alpha = self.gamma * pe + (1 - self.gamma) * self.alpha
 
         # Track for rollout aggregation
-        self.rollout_surprises.append(surprise)
+        self.rollout_surprises.extend(float(s) for s in surprises)
 
-        # Record history
-        self.surprise_history.append(surprise)
+        # Record history (one alpha entry per vec-step)
+        self.surprise_history.extend(float(s) for s in surprises)
         self.alpha_history.append(self.alpha)
 
-        # Periodically train forward model
-        if self.step_count % self.train_every == 0 and len(self.transition_buffer) >= self.batch_size:
+        # Periodically train forward model (train_every is in env-steps;
+        # trigger whenever a multiple of train_every was crossed)
+        if self.step_count % self.train_every < n and len(self.transition_buffer) >= self.batch_size:
             self._train_forward_model()
 
-        return SurpriseOutput(
-            surprise=surprise,
-            smoothed_surprise=self.alpha,
-            raw_error=raw_error.item() if isinstance(raw_error, torch.Tensor) else raw_error,
+        return BatchSurpriseOutput(
+            surprises=surprises,
+            alpha=self.alpha,
+            raw_errors=raw_errors,
         )
 
     def get_rollout_stats(self) -> dict:

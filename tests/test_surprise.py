@@ -154,6 +154,83 @@ class TestSurpriseModule:
         assert len(sm.transition_buffer) == 0
 
 
+class TestStepBatch:
+    """Tests for vectorized (batched) surprise computation."""
+
+    def test_batch_shapes(self):
+        sm = SurpriseModule(state_dim=8, action_dim=4)
+
+        states = np.random.randn(4, 8).astype(np.float32)
+        actions = np.random.randint(0, 4, size=4)
+        next_states = np.random.randn(4, 8).astype(np.float32)
+
+        out = sm.step_batch(states, actions, next_states)
+
+        assert out.surprises.shape == (4,)
+        assert out.raw_errors.shape == (4,)
+        assert isinstance(out.alpha, float)
+
+    def test_one_alpha_update_per_vec_step(self):
+        """Alpha is smoothed once per vec-step, not once per env."""
+        sm = SurpriseModule(state_dim=8, action_dim=4)
+
+        for _ in range(5):
+            sm.step_batch(
+                np.random.randn(4, 8).astype(np.float32),
+                np.random.randint(0, 4, size=4),
+                np.random.randn(4, 8).astype(np.float32),
+            )
+
+        assert len(sm.alpha_history) == 5
+
+    def test_step_count_in_env_steps(self):
+        """step_count advances by the batch size (env-steps, not vec-steps)."""
+        sm = SurpriseModule(state_dim=8, action_dim=4)
+
+        sm.step_batch(
+            np.random.randn(4, 8).astype(np.float32),
+            np.random.randint(0, 4, size=4),
+            np.random.randn(4, 8).astype(np.float32),
+        )
+
+        assert sm.step_count == 4
+        assert len(sm.transition_buffer) == 4
+        assert len(sm.surprise_history) == 4
+        assert sm.get_rollout_stats()["n_steps"] == 4
+
+    def test_forward_model_trains_when_threshold_crossed(self):
+        """train_every is denominated in env-steps even with batches."""
+        sm = SurpriseModule(state_dim=8, action_dim=4, train_every=100, batch_size=64)
+
+        # 13 vec-steps x 8 envs = 104 env-steps: crosses train_every=100
+        for _ in range(13):
+            sm.step_batch(
+                np.random.randn(8, 8).astype(np.float32),
+                np.random.randint(0, 4, size=8),
+                np.random.randn(8, 8).astype(np.float32),
+            )
+
+        assert sm.forward_model.update_count == 1
+
+    def test_scalar_step_parity(self):
+        """Scalar step() (batch of 1) matches the documented behavior."""
+        torch.manual_seed(0)
+        sm = SurpriseModule(state_dim=8, action_dim=4, gamma=0.5)
+
+        state = torch.randn(8)
+        action = torch.tensor(2)
+        next_state = torch.randn(8)
+
+        out = sm.step(state, action, next_state)
+
+        assert sm.step_count == 1
+        assert len(sm.alpha_history) == 1
+        # alpha = gamma*|surprise| + (1-gamma)*1.0
+        expected = 0.5 * abs(out.surprise) + 0.5 * 1.0
+        assert sm.alpha == pytest.approx(expected)
+        assert out.smoothed_surprise == pytest.approx(sm.alpha)
+
+
 class TestPearceHallDynamics:
     """Tests specifically for Pearce-Hall learning dynamics."""
 

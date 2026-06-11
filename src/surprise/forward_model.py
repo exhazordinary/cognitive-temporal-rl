@@ -106,6 +106,36 @@ class ForwardModel(nn.Module):
 
             return error.item(), error
 
+    def compute_surprise_batch(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        next_states: torch.Tensor,
+        normalize: bool = True,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute surprise for a batch of transitions in one forward pass.
+
+        Args:
+            states: Batch of states (batch_size, state_dim)
+            actions: Batch of actions (batch_size,)
+            next_states: Batch of actual next states (batch_size, state_dim)
+            normalize: Whether to normalize by running statistics
+
+        Returns:
+            Tuple of (surprises (batch_size,), raw_errors (batch_size,))
+        """
+        with torch.no_grad():
+            predicted = self.forward(states, actions)
+            errors = (predicted - next_states).pow(2).mean(dim=-1)
+            raw = errors.numpy()
+
+            if normalize and self.update_count > 100:
+                normalized = (raw - self.error_mean) / (np.sqrt(self.error_var) + 1e-8)
+                normalized = np.clip(normalized, -5.0, 5.0)
+                return normalized, raw
+
+            return raw.copy(), raw
+
     def train_step(
         self,
         states: torch.Tensor,

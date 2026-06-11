@@ -20,9 +20,13 @@ class SurNoRConfig:
     # Use None for random seeds to avoid deterministic trajectory issue
     seeds: List[Optional[int]] = field(default_factory=lambda: [None] * 10)
 
+    # Vectorization
+    n_envs: int = 8
+    vec_env_type: str = "dummy"  # "dummy" or "subproc"
+
     # PPO params
     learning_rate: float = 3e-4
-    n_steps: int = 2048
+    n_steps_total: int = 2048  # rollout size in env-steps, split across envs
     batch_size: int = 64
     n_epochs: int = 10
     gamma: float = 0.99

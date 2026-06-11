@@ -34,8 +34,10 @@ def run_single_experiment(config: SurNoRConfig, seed: int) -> dict:
 
     agent = SurNoRPPO(
         env_name=config.env_name,
+        n_envs=config.n_envs,
+        vec_env_type=config.vec_env_type,
         learning_rate=config.learning_rate,
-        n_steps=config.n_steps,
+        n_steps_total=config.n_steps_total,
         batch_size=config.batch_size,
         n_epochs=config.n_epochs,
         gamma=config.gamma,
@@ -91,6 +93,8 @@ def run_experiments(
     experiment_names: list[str],
     n_seeds: int = 10,
     total_timesteps: int = None,
+    n_envs: int = None,
+    vec_env_type: str = None,
     output_dir: str = "results",
 ) -> dict:
     """Run multiple experiments across seeds."""
@@ -103,6 +107,10 @@ def run_experiments(
         # Apply overrides
         if total_timesteps is not None:
             config.total_timesteps = total_timesteps
+        if n_envs is not None:
+            config.n_envs = n_envs
+        if vec_env_type is not None:
+            config.vec_env_type = vec_env_type
 
         seeds = config.seeds[:n_seeds]
 
@@ -192,6 +200,18 @@ def main():
         help="Number of seeds to run (default: 10)",
     )
     parser.add_argument(
+        "--n-envs",
+        type=int,
+        default=None,
+        help="Number of parallel envs (default: from config)",
+    )
+    parser.add_argument(
+        "--vec-env",
+        choices=["dummy", "subproc"],
+        default=None,
+        help="Vectorization backend (default: from config)",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="results",
@@ -212,6 +232,8 @@ def main():
         experiment_names=experiments,
         n_seeds=args.seeds,
         total_timesteps=args.timesteps,
+        n_envs=args.n_envs,
+        vec_env_type=args.vec_env,
         output_dir=args.output,
     )
 
