@@ -254,11 +254,13 @@ class SurNoRPPO:
         self.env = make_vec_env(env_name, n_envs=n_envs, seed=seed, vec_env_cls=vec_env_cls)
 
         # Get dimensions (VecEnv exposes the single-env spaces)
+        if not isinstance(self.env.action_space, gym.spaces.Discrete):
+            raise ValueError(
+                f"SurNoRPPO requires a discrete action space (the forward model "
+                f"one-hot encodes actions); {env_name} has {self.env.action_space}."
+            )
         state_dim = self.env.observation_space.shape[0]
-        if hasattr(self.env.action_space, 'n'):
-            action_dim = self.env.action_space.n
-        else:
-            action_dim = self.env.action_space.shape[0]
+        action_dim = self.env.action_space.n
 
         # Create surprise module
         self.surprise_module = SurpriseModule(

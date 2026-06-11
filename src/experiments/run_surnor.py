@@ -22,7 +22,7 @@ from pathlib import Path
 from dataclasses import asdict
 import numpy as np
 
-from .surnor_config import SURNOR_EXPERIMENTS, SurNoRConfig, get_experiment_names
+from .surnor_config import ENV_DEFAULTS, SurNoRConfig, build_experiments, get_experiment_names
 from ..agents.surnor_ppo import SurNoRPPO
 
 
@@ -96,6 +96,7 @@ def compute_summary(results_list: list[dict]) -> dict:
 
 def run_experiments(
     experiment_names: list[str],
+    env_id: str = "LunarLander-v3",
     n_seeds: int = 10,
     total_timesteps: int = None,
     n_envs: int = None,
@@ -105,9 +106,10 @@ def run_experiments(
     """Run multiple experiments across seeds."""
     all_results = {}
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiments = build_experiments(env_id)
 
     for exp_name in experiment_names:
-        config = SURNOR_EXPERIMENTS[exp_name]
+        config = experiments[exp_name]
 
         # Apply overrides
         if total_timesteps is not None:
@@ -140,7 +142,7 @@ def run_experiments(
     # Save results
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    results_file = output_path / f"surnor_{timestamp}.json"
+    results_file = output_path / f"surnor_{env_id}_{timestamp}.json"
 
     # Convert to JSON-serializable format
     serializable = _make_serializable(all_results)
@@ -193,10 +195,17 @@ def main():
         help="Run all experiments",
     )
     parser.add_argument(
+        "--env",
+        type=str,
+        default="LunarLander-v3",
+        choices=list(ENV_DEFAULTS),
+        help="Environment to run on (default: LunarLander-v3)",
+    )
+    parser.add_argument(
         "--timesteps",
         type=int,
         default=None,
-        help="Total timesteps per run (default: from config)",
+        help="Total timesteps per run (default: from env defaults)",
     )
     parser.add_argument(
         "--seeds",
@@ -235,6 +244,7 @@ def main():
 
     run_experiments(
         experiment_names=experiments,
+        env_id=args.env,
         n_seeds=args.seeds,
         total_timesteps=args.timesteps,
         n_envs=args.n_envs,

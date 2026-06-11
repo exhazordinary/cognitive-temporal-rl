@@ -7,7 +7,7 @@ New experiments based on research synthesis:
 4. Both directions tested (high surprise -> high/low LR)
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, List
 
 
@@ -156,13 +156,48 @@ SURNOR_EXPERIMENTS = {
 }
 
 
+# Per-environment defaults applied on top of every experiment config.
+# All envs must have discrete action spaces (forward model one-hot encodes).
+ENV_DEFAULTS = {
+    # Main benchmark
+    "LunarLander-v3": {"total_timesteps": 200_000, "ent_coef": 0.01},
+    # Solves fast with a reward ceiling of 500 - sanity/smoke env more than
+    # a discriminative benchmark
+    "CartPole-v1": {"total_timesteps": 100_000, "ent_coef": 0.0},
+    # PPO reliably reaches ~-80 to -100; good discriminative env
+    "Acrobot-v1": {"total_timesteps": 150_000, "ent_coef": 0.01},
+    # EXPLORATORY: sparse reward, PPO often floors at -200 with default
+    # hyperparameters. Interesting for the surprise hypothesis but don't
+    # let it drive conclusions.
+    "MountainCar-v0": {"total_timesteps": 300_000, "ent_coef": 0.01},
+}
+
+
+def build_experiments(env_id: str = "LunarLander-v3") -> dict:
+    """Build the experiment registry for a given environment.
+
+    Applies ENV_DEFAULTS for the env on top of every experiment config.
+    """
+    if env_id not in ENV_DEFAULTS:
+        raise ValueError(
+            f"Unknown environment: {env_id}. Available: {list(ENV_DEFAULTS)}. "
+            f"Add an entry to ENV_DEFAULTS to use a new (discrete-action) env."
+        )
+    overrides = {"env_name": env_id, **ENV_DEFAULTS[env_id]}
+    return {
+        name: replace(config, **overrides)
+        for name, config in SURNOR_EXPERIMENTS.items()
+    }
+
+
 def get_experiment_names() -> List[str]:
     """Get list of all experiment names."""
     return list(SURNOR_EXPERIMENTS.keys())
 
 
-def get_experiment(name: str) -> SurNoRConfig:
-    """Get experiment config by name."""
-    if name not in SURNOR_EXPERIMENTS:
+def get_experiment(name: str, env_id: str = "LunarLander-v3") -> SurNoRConfig:
+    """Get experiment config by name for a given environment."""
+    experiments = build_experiments(env_id)
+    if name not in experiments:
         raise ValueError(f"Unknown experiment: {name}. Available: {get_experiment_names()}")
-    return SURNOR_EXPERIMENTS[name]
+    return experiments[name]
