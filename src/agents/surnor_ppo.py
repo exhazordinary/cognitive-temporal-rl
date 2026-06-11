@@ -23,6 +23,23 @@ from ..surprise import SurpriseModule
 from ..modulators.pearce_hall_lr import PearceHallLR
 
 
+class MutableLRSchedule:
+    """Picklable LR schedule whose value the callback mutates per update.
+
+    SB3's ``PPO.train()`` calls ``_update_learning_rate()`` as its first
+    action, overwriting whatever the callback wrote into the optimizer with
+    the schedule's value. Writing the modulated LR into this schedule (and
+    letting SB3 apply it) is therefore the only path that actually reaches
+    the gradient steps.
+    """
+
+    def __init__(self, base_lr: float):
+        self.current_lr = base_lr
+
+    def __call__(self, progress_remaining: float) -> float:
+        return self.current_lr
+
+
 class SurNoRCallback(BaseCallback):
     """Callback integrating surprise-based LR modulation with PPO.
 
@@ -35,12 +52,14 @@ class SurNoRCallback(BaseCallback):
         self,
         surprise_module: SurpriseModule,
         lr_modulator: Optional[PearceHallLR] = None,
+        lr_schedule: Optional[MutableLRSchedule] = None,
         intrinsic_reward_scale: float = 0.0,  # 0 = disabled
         verbose: int = 0,
     ):
         super().__init__(verbose)
         self.surprise_module = surprise_module
         self.lr_modulator = lr_modulator
+        self.lr_schedule = lr_schedule
         self.intrinsic_reward_scale = intrinsic_reward_scale
 
         # Episode tracking
@@ -125,11 +144,11 @@ class SurNoRCallback(BaseCallback):
         stats = self.surprise_module.get_rollout_stats()
         alpha = stats["alpha"]
 
-        # Apply LR modulation to optimizer
-        new_lr = self.lr_modulator.apply_to_optimizer(
-            self.model.policy.optimizer,
-            alpha,
-        )
+        # Write the modulated LR into the schedule; SB3's
+        # _update_learning_rate() applies it at the start of train().
+        new_lr = self.lr_modulator.compute_lr(alpha)
+        if self.lr_schedule is not None:
+            self.lr_schedule.current_lr = new_lr
 
         # Track
         self.update_alphas.append(alpha)
@@ -221,11 +240,15 @@ class SurNoRPPO:
             invert=invert_lr,
         ) if use_lr_modulation else None
 
+        # Mutable schedule: the callback writes the modulated LR here and
+        # SB3 applies it at the start of each train() call.
+        self.lr_schedule = MutableLRSchedule(learning_rate)
+
         # Create PPO model
         self.model = PPO(
             "MlpPolicy",
             self.env,
-            learning_rate=learning_rate,
+            learning_rate=self.lr_schedule,
             n_steps=n_steps,
             batch_size=batch_size,
             n_epochs=n_epochs,
@@ -240,6 +263,7 @@ class SurNoRPPO:
         self.callback = SurNoRCallback(
             surprise_module=self.surprise_module,
             lr_modulator=self.lr_modulator,
+            lr_schedule=self.lr_schedule,
             intrinsic_reward_scale=intrinsic_reward_scale,
             verbose=verbose,
         )
