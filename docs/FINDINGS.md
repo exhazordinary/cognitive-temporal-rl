@@ -230,3 +230,55 @@ uv run python scripts/analyze_results.py --results results/ablation_*.json
 # With detailed per-run diagnostics
 uv run python scripts/analyze_results.py --results results/ablation_*.json --detailed
 ```
+
+---
+
+## June 2026: Code review — three bugs invalidate prior SurNoR results
+
+A review of `surnor_ppo.py` against the installed Stable-Baselines3 (2.7.1)
+source found three bugs. All are fixed; regression tests guard each one.
+
+### Bug 1: LR modulation was a silent no-op (critical)
+
+`SurNoRCallback._on_rollout_end()` wrote the modulated LR directly into the
+optimizer's param groups. But SB3's `PPO.train()` calls
+`self._update_learning_rate(self.policy.optimizer)` as its **first** action
+after rollout collection, resetting every param group from the LR schedule —
+a constant 3e-4, since `learning_rate` was passed as a float. The modulated
+LR was overwritten before any gradient step.
+
+**Implication:** all SurNoR experiment arms trained with identical, constant
+LR. The +14.8% stabilization result cannot be attributed to LR modulation;
+the only code-path differences vs baseline were incidental (background
+forward-model training and RNG consumption). The result may be noise.
+
+**Fix:** a `MutableLRSchedule` is passed to PPO as its `learning_rate`; the
+callback writes the modulated value into the schedule and SB3 itself applies
+it. Regression test: `tests/test_surnor_integration.py` (fails on old code).
+
+### Bug 2: Off-by-one action in surprise transitions
+
+The callback computed surprise on `(prev_obs, prev_action, new_obs)` where
+`prev_action` was captured on the *previous* callback step. The action that
+actually produced `new_obs` is the current `locals["actions"]`. The forward
+model was trained on mispaired transitions throughout.
+
+### Bug 3: Surprise computed across episode resets
+
+SB3 VecEnvs auto-reset: on `done` steps, `new_obs` is the *next* episode's
+reset observation. The true terminal observation lives in
+`infos[i]["terminal_observation"]`. Surprise (and forward-model training
+data) included these cross-boundary pseudo-transitions.
+
+Bugs 2 and 3 were fixed by the batched callback rewrite that came with
+environment vectorization.
+
+### Comparability break
+
+Old and new results are **not comparable**, for three independent reasons:
+the LR fix, the corrected forward-model training data, and vectorization
+(Pearce-Hall alpha is now updated once per vec-step from the mean |PE|
+across envs, so gamma's smoothing timescale in env-steps stretches with
+n_envs). All configs — including baseline — must be re-run under the new
+regime before drawing conclusions. Vectorization makes this ~1.5-2x cheaper
+per run on a 4-core CPU, more on larger machines.

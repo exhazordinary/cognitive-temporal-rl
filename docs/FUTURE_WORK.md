@@ -6,31 +6,33 @@ Ideas for continuing this research, prioritized by potential impact.
 
 ## High Priority
 
-### 1. Test the VolatilityDetector
+### 0. Re-run all experiments post-bugfix (June 2026)
 
-We implemented `src/surprise/volatility_detector.py` but haven't run experiments with it yet.
+Three bugs were found and fixed (see `docs/FINDINGS.md`, "June 2026"); the
+headline +14.8% stabilization result predates them and is unvalidated.
 
-**The idea:** Dynamically switch between stabilization (when noise dominates) and Pearce-Hall (when true volatility is detected).
-
-```python
-# Current: static approach
-if noise_detected:
-    lr_multiplier = decrease  # stabilization
-
-# Proposed: adaptive approach
-if volatility_detected:
-    lr_multiplier = increase  # Pearce-Hall (environment changed)
-else:
-    lr_multiplier = decrease  # stabilization (just noise)
-```
-
-**Why it matters:** Could get the best of both worlds - stable learning in noise, fast adaptation to real change.
-
-**To run:**
 ```bash
-# Add volatility_detector experiment to surnor_config.py
-uv run python -m src.experiments.run_surnor --experiments baseline volatility_adaptive --timesteps 200000 --seeds 10
+uv run python -m src.experiments.run_surnor \
+  --experiments baseline surnor_pearce_hall surnor_stab_gamma_0.1 surnor_stabilize surnor_adaptive
+uv run python scripts/analyze_results.py --results results/surnor_LunarLander-v3_*.json
 ```
+
+---
+
+### 1. ~~Test the VolatilityDetector~~ DONE (wired in, needs experiments)
+
+The detector is now integrated as `lr_mode="adaptive"` with two configs
+(`surnor_adaptive`, `surnor_adaptive_sensitive`) and per-update
+volatility/noise/change-point logging in the results JSON.
+
+```bash
+uv run python -m src.experiments.run_surnor --experiments baseline surnor_adaptive surnor_adaptive_sensitive
+```
+
+**Open tuning question:** with default settings the detector flags many
+change points early in training while the forward model is still learning
+(its PEs drift, which looks like volatility). Consider a warmup period or a
+higher `vol_change_threshold` if the adaptive arm over-boosts early.
 
 ---
 
@@ -74,21 +76,23 @@ reward = extrinsic_reward + beta * novelty_bonus
 
 ---
 
-### 4. Statistical Significance Testing
+### 4. ~~Statistical Significance Testing~~ DONE
 
-Current results (10 seeds) show:
-- Stabilization γ=0.1: 135.99 ± 54.59
-- Baseline: 118.50 ± 70.76
+`src/analysis/stats.py` + `scripts/analyze_results.py` now report bootstrap
+CIs, Welch's t-test, IQM, and Hedges' g per environment.
 
-**To do:**
-- Welch's t-test or Mann-Whitney U
-- Bootstrap confidence intervals
-- Effect size (Cohen's d)
+---
 
-```python
-from scipy import stats
-t_stat, p_value = stats.ttest_ind(stabilization_results, baseline_results)
-```
+### 4b. Faster vectorization backend (PufferLib)
+
+Training now uses SB3 vectorized envs (DummyVecEnv default, `--vec-env
+subproc` available). The SurNoR callback's only contracts with the env layer
+are SB3's `locals` keys and the `terminal_observation` info convention, so a
+faster backend like PufferLib's vectorization could later be swapped in
+behind a thin SB3 `VecEnv` adapter without touching the surprise pipeline.
+A full port to PufferLib's own PPO trainer was considered and deliberately
+deferred: it would require reimplementing the LR modulation inside their
+trainer and break comparability with SB3 runs.
 
 ---
 
@@ -140,6 +144,11 @@ Test interactions with:
 | Test gamma variations | Done | γ=0.1 optimal |
 | Implement VolatilityDetector | Done | `src/surprise/volatility_detector.py` |
 | Document theoretical foundation | Done | `docs/THEORETICAL_FOUNDATION.md` |
+| Fix LR modulation no-op + transition bugs | Done (June 2026) | `docs/FINDINGS.md`, regression tests |
+| Vectorize training (8 envs default) | Done (June 2026) | `src/agents/surnor_ppo.py` |
+| Wire VolatilityDetector into experiments | Done (June 2026) | `lr_mode="adaptive"` |
+| Statistical analysis (CIs, Welch, IQM) | Done (June 2026) | `src/analysis/stats.py` |
+| Multi-env configs (CartPole/Acrobot/MountainCar) | Done (June 2026) | `--env` flag |
 
 ---
 

@@ -62,6 +62,20 @@ State observation
 
 **Key Fix:** LR modulation happens at PPO UPDATE time (after rollout), not per-step!
 
+## ⚠️ Important: prior results are unvalidated (June 2026)
+
+A code review found that **the LR modulation never actually reached PPO's
+gradient updates**: SB3's `PPO.train()` re-applies the (constant) LR schedule
+as its first action, silently overwriting the value the callback had written
+into the optimizer. Two further bugs were found in the transition pairing fed
+to the forward model (action off by one step, and surprise computed across
+episode auto-reset boundaries). All three are fixed, with regression tests.
+
+**Consequence:** every number in the tables below — including the headline
++14.8% stabilization result — predates these fixes and must be re-run before
+being cited. See `docs/FINDINGS.md` ("June 2026") for details. Training is
+now vectorized, so the re-run is considerably cheaper.
+
 ## Current Status
 
 ### Original Approach (Entropy-based) - FAILED
@@ -73,7 +87,7 @@ State observation
 
 **Why it failed:** See `docs/RESEARCH_SYNTHESIS.md` for detailed analysis.
 
-### New Approach (SurNoR-inspired) - CONFIRMED RESULTS
+### New Approach (SurNoR-inspired) - PRE-BUGFIX RESULTS (re-run required)
 
 | Experiment | Mean Final Reward | Std Dev | vs Baseline |
 |------------|-------------------|---------|-------------|
@@ -105,16 +119,28 @@ State observation
 - Adam optimizer implements this principle via signal-to-noise ratio scaling
 - Slow γ allows the system to average over noise rather than react to every fluctuation
 
+## LR Modulation Modes
+
+Set per experiment via `lr_mode` in `src/experiments/surnor_config.py`:
+
+| Mode | Behavior |
+|------|----------|
+| `none` | No modulation (baseline; forward model still trains) |
+| `pearce_hall` | High surprise → higher LR |
+| `stabilize` | High surprise → lower LR |
+| `adaptive` | VolatilityDetector picks the direction per rollout: detected change points boost LR, noise-dominated rollouts reduce it (Gershman 2020) |
+
 ## Key Files
 
 | Component | File | Description |
 |-----------|------|-------------|
-| Forward Model | `src/surprise/forward_model.py` | Predicts next state, computes PE |
+| Forward Model | `src/surprise/forward_model.py` | Predicts next state, computes PE (batched) |
 | Surprise Module | `src/surprise/surprise_module.py` | Pearce-Hall smoothing, rollout aggregation |
-| Volatility Detector | `src/surprise/volatility_detector.py` | Distinguishes volatility from noise |
+| Volatility Detector | `src/surprise/volatility_detector.py` | Distinguishes volatility from noise (`lr_mode="adaptive"`) |
 | Pearce-Hall LR | `src/modulators/pearce_hall_lr.py` | LR modulation at update time |
-| SurNoR PPO | `src/agents/surnor_ppo.py` | Fixed PPO with proper timing |
-| Experiments | `src/experiments/run_surnor.py` | Experiment runner |
+| SurNoR PPO | `src/agents/surnor_ppo.py` | Vectorized PPO with surprise-modulated LR |
+| Experiments | `src/experiments/run_surnor.py` | Experiment runner (`--env`, `--n-envs`) |
+| Statistics | `src/analysis/stats.py` | Bootstrap CIs, Welch's t-test, IQM, Hedges' g |
 | Theory | `docs/THEORETICAL_FOUNDATION.md` | Why stabilization works |
 | Research | `docs/RESEARCH_SYNTHESIS.md` | Full literature review |
 | Future Work | `docs/FUTURE_WORK.md` | Next research directions |
@@ -122,126 +148,76 @@ State observation
 ## Quick Start
 
 ```bash
-# Setup
+# Setup (needs swig on the system for box2d: apt install swig)
 cd cognitive-temporal-rl
-uv venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
+uv venv && uv sync --extra dev
 
-# Run new SurNoR experiments
-uv run python -m src.experiments.run_surnor --experiments baseline surnor_pearce_hall surnor_stabilize
+# Smoke test: verify everything works end to end (~2 min on CPU)
+uv run python -m src.experiments.run_surnor \
+  --env CartPole-v1 --experiments baseline surnor_stabilize surnor_adaptive \
+  --n-envs 8 --timesteps 10000 --seeds 1
+uv run python scripts/analyze_results.py --results results/surnor_CartPole-v1_*.json
 
-# Quick test (fewer timesteps)
-uv run python -m src.experiments.run_surnor --experiments baseline surnor_pearce_hall --timesteps 50000 --seeds 3
+# Full LunarLander comparison (10 seeds x 200k steps each)
+uv run python -m src.experiments.run_surnor \
+  --experiments baseline surnor_pearce_hall surnor_stabilize surnor_adaptive
+
+# Other environments
+uv run python -m src.experiments.run_surnor --env Acrobot-v1 --experiments baseline surnor_stabilize
 
 # Run tests
 uv run pytest tests/ -v
 ```
+
+Training uses 8 parallel environments by default (`--n-envs` to change).
+The rollout size (`n_steps_total=2048`) is defined in env-steps and split
+across envs, so the number of PPO updates is independent of `n_envs`. On a
+4-core CPU, 50k LunarLander steps: 84s at 1 env → 55s at 8 → 40s at 16.
+
+Available environments (`--env`): `LunarLander-v3` (main benchmark),
+`Acrobot-v1` (discriminative), `CartPole-v1` (smoke/sanity, reward ceiling),
+`MountainCar-v0` (exploratory — sparse reward, PPO often floors at −200).
+
+The analysis script reports mean ± std, 95% bootstrap CIs, IQM, and a
+vs-baseline table with Welch's t-test and Hedges' g, grouped per environment.
 
 ## Project Structure
 
 ```
 cognitive-temporal-rl/
 ├── src/
-│   ├── surprise/                 # NEW: Prediction error based surprise
-│   │   ├── forward_model.py      # Predicts next state
-│   │   └── surprise_module.py    # Pearce-Hall smoothing
-│   ├── entropy_clock/            # LEGACY: Entropy-based approach
-│   │   ├── clock.py              # EntropyClockModule
-│   │   └── buffers.py            # Rolling state buffer
+│   ├── surprise/                 # Prediction-error based surprise
+│   │   ├── forward_model.py      # Predicts next state (batched)
+│   │   ├── surprise_module.py    # Pearce-Hall smoothing
+│   │   └── volatility_detector.py # Volatility vs noise (adaptive mode)
 │   ├── modulators/
-│   │   ├── pearce_hall_lr.py     # NEW: Fixed LR modulation
-│   │   ├── learning_rate.py      # LEGACY: Per-step LR (broken)
-│   │   └── exploration.py        # Exploration modulation
+│   │   └── pearce_hall_lr.py     # LR modulation at update time
 │   ├── agents/
-│   │   ├── surnor_ppo.py         # NEW: Fixed PPO with proper timing
-│   │   ├── temporal_ppo.py       # LEGACY: Original (has timing bug)
+│   │   ├── surnor_ppo.py         # Vectorized SurNoR PPO
 │   │   └── base_ppo.py           # Vanilla PPO baseline
+│   ├── analysis/
+│   │   └── stats.py              # Bootstrap CI, Welch, IQM, Hedges' g
 │   └── experiments/
-│       ├── run_surnor.py         # NEW: SurNoR experiment runner
-│       ├── surnor_config.py      # NEW: SurNoR configurations
-│       ├── train.py              # LEGACY: Original runner
-│       └── config.py             # LEGACY: Original configs
+│       ├── run_surnor.py         # Experiment runner
+│       └── surnor_config.py      # Configs + per-env defaults
+├── legacy/                       # Deprecated entropy-clock approach (see legacy/README.md)
 ├── docs/
 │   ├── RESEARCH_SYNTHESIS.md     # Literature review & analysis
-│   └── FINDINGS.md               # Original experiment findings
+│   └── FINDINGS.md               # Experiment findings & bug history
+├── scripts/
+│   └── analyze_results.py        # Statistics + plots
 ├── results/                      # Experiment outputs (JSON)
 └── tests/
 ```
+
+The original entropy-based approach (failed; see `docs/FINDINGS.md`) is
+preserved under `legacy/` for reference.
 
 ## References
 
 - **SurNoR:** [Novelty is not surprise (2021)](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1009070)
 - **Pearce-Hall:** [Prediction errors, attention and associative learning](https://pmc.ncbi.nlm.nih.gov/articles/PMC4862921/)
+- **Gershman:** [Unpredictability vs. volatility and the control of learning (2020)](https://www.biorxiv.org/content/10.1101/2020.10.05.327007v2)
 - **RND:** [Exploration by Random Network Distillation (2018)](https://arxiv.org/abs/1810.12894)
 - **ICM:** [Curiosity-driven Exploration (2017)](https://arxiv.org/abs/1705.05363)
 - **PPO:** [Proximal Policy Optimization](https://arxiv.org/abs/1707.06347)
-
----
-
-## Legacy Quick Start (Original Approach)
-
-```bash
-# Setup
-cd cognitive-temporal-rl
-uv venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
-
-# Run tests
-uv run pytest tests/ -v
-
-# Train and watch agent
-uv run python -m src.agents.temporal_ppo
-uv run python scripts/watch.py --model models/temporal_ppo_lunarlander
-
-# Run ablation study
-uv run python -m src.experiments.train --experiments baseline salience_lr --timesteps 200000 --seeds 5
-```
-
-## Project Structure
-
-```
-cognitive-temporal-rl/
-├── src/
-│   ├── entropy_clock/         # Core: entropy computation
-│   │   ├── clock.py           # EntropyClockModule - the main idea
-│   │   └── buffers.py         # Rolling state buffer
-│   ├── modulators/            # Experiments: how salience affects training
-│   │   ├── learning_rate.py   # Modulate LR by salience
-│   │   ├── exploration.py     # Modulate exploration by entropy
-│   │   └── replay.py          # Prioritize replay by salience
-│   ├── agents/
-│   │   ├── base_ppo.py        # Vanilla PPO baseline
-│   │   └── temporal_ppo.py    # PPO + entropy clock
-│   └── experiments/
-│       ├── config.py          # Experiment configurations
-│       └── train.py           # Ablation runner
-├── scripts/
-│   └── watch.py               # Visualize agent playing
-├── tests/
-├── results/                   # Experiment outputs (JSON)
-└── docs/plans/
-```
-
-## Key Code Locations
-
-| Concept | File | Function/Class |
-|---------|------|----------------|
-| Entropy calculation | `entropy_clock/clock.py` | `_compute_covariance_entropy()` |
-| Salience scoring | `entropy_clock/clock.py` | `EntropyClockModule.step()` |
-| LR modulation | `modulators/learning_rate.py` | `SalienceLR.get_lr()` |
-| Integration point | `agents/temporal_ppo.py` | `TemporalCallback._on_step()` |
-
-## Background
-
-This project explores whether cognitive-inspired temporal mechanisms can improve RL training. The core idea:
-
-- Humans experience "time dilation" during novel events
-- This can be modeled computationally using entropy as a proxy
-- An "internal clock" that speeds up during routine and slows during novelty might help agents focus on what matters
-
-The goal is to test whether this mechanism has practical benefits for RL, not to make claims about AI consciousness.
-
-## References
-
-- PPO: [Proximal Policy Optimization](https://arxiv.org/abs/1707.06347)
-- Environment: [LunarLander-v3](https://gymnasium.farama.org/environments/box2d/lunar_lander/)
